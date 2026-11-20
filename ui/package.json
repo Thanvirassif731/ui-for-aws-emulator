@@ -1,0 +1,32 @@
+{
+  "name": "aws-emulator-ui",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Companion web UI for the local AWS emulator. Talks to the emulator over HTTPS only.",
+  "type": "module",
+  "contributors": [
+    "Thanvir Assif"
+  ],
+  "scripts": {
+    "dev": "concurrently -n api,web -c blue,green \"npm:dev:server\" \"npm:dev:web\"",
+    "dev:server": "node --watch server/index.js",
+    "dev:web": "vite --config web/vite.config.js",
+    "build": "vite build --config web/vite.config.js",
+    "start": "node server/index.js",
+    "test": "node --test server/test/*.test.js"
+  },
+  "dependencies": {
+    "aws4": "^1.13.2",
+    "express": "^4.21.2",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "concurrently": "^9.1.2",
+    "vite": "^6.0.7"
+  },
+  "allowScripts": {
+    "esbuild@0.25.12": true
+  }
+}
