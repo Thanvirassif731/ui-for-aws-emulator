@@ -29,7 +29,7 @@ export function readCredentials() {
   };
 }
 
-function readCa() {
+export function readCa() {
   const file = path.join(emulatorDir(), 'ca.pem');
   return fs.existsSync(file) ? fs.readFileSync(file) : null;
 }

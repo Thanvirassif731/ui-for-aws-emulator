@@ -1,6 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from './api.js';
 import Icon from './Icon.jsx';
+import { confirmDialog } from './dialogs.js';
+import { notifyError, notifySuccess } from './notifications.js';
+import { RESOURCE_REFRESH_EVENT } from './resourceEvents.js';
 
 const PREVIEW_MAX = 256 * 1024;
 const UPLOAD_MAX = 16 * 1024 * 1024;
@@ -53,10 +56,15 @@ export default function S3() {
     if (!['buckets', 'objects', 'more', 'preview'].includes(label)) setNotice('');
     try {
       const result = await fn();
-      if (busyId === busyRequest.current && successMessage) setNotice(typeof successMessage === 'function' ? successMessage(result) : successMessage);
+      if (busyId === busyRequest.current && successMessage) {
+        const message = typeof successMessage === 'function' ? successMessage(result) : successMessage;
+        setNotice(message);
+        notifySuccess(message, { title: 'S3 update', source: 'S3' });
+      }
       return result;
     } catch (e) {
       if (busyId === busyRequest.current) setError(e.message);
+      notifyError(e, { title: 'S3 action failed', source: 'S3' });
       return undefined;
     } finally {
       if (busyId === busyRequest.current) {
@@ -98,6 +106,11 @@ export default function S3() {
   useEffect(() => { loadBuckets(); }, [loadBuckets]);
   useEffect(() => { if (bucket) loadObjects(bucket, prefix); }, [bucket, prefix, loadObjects]);
   useEffect(() => { setObjectQuery(''); }, [bucket, prefix]);
+  useEffect(() => {
+    const refresh = () => { loadBuckets(); if (bucket) loadObjects(bucket, prefix); };
+    window.addEventListener(RESOURCE_REFRESH_EVENT, refresh);
+    return () => window.removeEventListener(RESOURCE_REFRESH_EVENT, refresh);
+  }, [bucket, prefix, loadBuckets, loadObjects]);
 
   const loadMore = () => guard('more', async () => {
     const requestId = ++objectRequest.current;
@@ -121,8 +134,13 @@ export default function S3() {
     }, `Bucket “${name}” created.`);
   };
 
-  const deleteBucket = (name) => {
-    if (!window.confirm(`Permanently delete bucket “${name}”? The bucket must be empty. This cannot be undone.`)) return;
+  const deleteBucket = async (name) => {
+    const confirmed = await confirmDialog({
+      title: 'Delete S3 bucket?',
+      message: `Bucket “${name}” will be permanently deleted. The bucket must be empty, and this action cannot be undone.`,
+      confirmLabel: 'Delete bucket',
+    });
+    if (!confirmed) return;
     guard('delete-bucket', async () => {
       await api.s3DeleteBucket(name);
       if (bucket === name) {
@@ -137,7 +155,9 @@ export default function S3() {
   const upload = (files) => {
     const tooLarge = files.find((f) => f.size > UPLOAD_MAX);
     if (tooLarge) {
-      setError(`${tooLarge.name} is larger than ${formatSize(UPLOAD_MAX)}.`);
+      const message = `${tooLarge.name} is larger than ${formatSize(UPLOAD_MAX)}.`;
+      setError(message);
+      notifyError(message, { title: 'Upload rejected', source: 'S3' });
       return;
     }
     const locationVersion = objectRequest.current;
@@ -159,7 +179,12 @@ export default function S3() {
   const createFolder = () => {
     const name = folderName.trim();
     if (!name) return;
-    if (name.includes('/')) { setError('Folder names cannot contain “/”.'); return; }
+    if (name.includes('/')) {
+      const message = 'Folder names cannot contain “/”.';
+      setError(message);
+      notifyError(message, { title: 'Invalid folder name', source: 'S3' });
+      return;
+    }
     const locationVersion = objectRequest.current;
     guard('folder', async () => {
       await api.s3Put(bucket, `${prefix}${name}/`, 'application/x-directory', '');
@@ -169,9 +194,14 @@ export default function S3() {
     }, `Folder “${name}” created.`);
   };
 
-  const deleteSelected = () => {
+  const deleteSelected = async () => {
     const count = selected.size;
-    if (!window.confirm(`Permanently delete ${count} object(s)? This cannot be undone.`)) return;
+    const confirmed = await confirmDialog({
+      title: `Delete ${count} ${count === 1 ? 'object' : 'objects'}?`,
+      message: `${count} selected ${count === 1 ? 'object' : 'objects'} will be permanently deleted. This action cannot be undone.`,
+      confirmLabel: count === 1 ? 'Delete object' : 'Delete objects',
+    });
+    if (!confirmed) return;
     const locationVersion = objectRequest.current;
     guard('delete', async () => {
       let failure;

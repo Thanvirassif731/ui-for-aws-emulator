@@ -74,9 +74,10 @@ export async function deleteBucket(name) {
   await call({ method: 'DELETE', path: `/${name}` });
 }
 
-export async function listObjects(bucket, { prefix = '', token = '' } = {}) {
+export async function listObjects(bucket, { prefix = '', token = '', recursive = false } = {}) {
   checkBucket(bucket);
-  const query = { 'list-type': '2', delimiter: '/', 'max-keys': '200' };
+  const query = { 'list-type': '2', 'max-keys': recursive ? '1000' : '200' };
+  if (!recursive) query.delimiter = '/';
   if (prefix) query.prefix = prefix;
   if (token) query['continuation-token'] = token;
   const res = await call({ method: 'GET', path: `/${bucket}`, query });

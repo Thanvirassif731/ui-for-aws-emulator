@@ -1,8 +1,8 @@
 {
   "name": "aws-emulator-ui",
   "private": true,
-  "version": "0.1.0",
-  "description": "Companion web UI for the local AWS emulator. Talks to the emulator over HTTPS only.",
+  "version": "0.3.0",
+  "description": "Companion UI and traffic inspector for local AWS Emulator development.",
   "type": "module",
   "contributors": [
     "Thanvir Assif"

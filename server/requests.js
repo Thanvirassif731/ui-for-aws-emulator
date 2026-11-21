@@ -98,6 +98,90 @@ function buildQuery(model, summary, opName, op, input) {
 }
 
 // ---------- restJson / restXml ----------
+const escapeXmlText = (value) => String(value)
+  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+const escapeXmlAttribute = (value) => escapeXmlText(value).replace(/"/g, '&quot;').replace(/'/g, '&apos;');
+
+function xmlName(shape, fallback) {
+  return trait(shape?.traits, 'xmlName') || fallback;
+}
+
+function xmlScalar(shape, value, traits = {}) {
+  if (shape?.type === 'blob') {
+    if (Buffer.isBuffer(value)) return value.toString('base64');
+    return Buffer.from(String(value), 'utf8').toString('base64');
+  }
+  const timestampFormat = trait(traits, 'timestampFormat') || trait(shape?.traits, 'timestampFormat');
+  if (shape?.type === 'timestamp' && timestampFormat === 'epoch-seconds') {
+    const n = typeof value === 'number' ? value : Date.parse(value) / 1000;
+    if (!Number.isFinite(n)) throw new BuildError(`Invalid timestamp "${value}"`);
+    return String(n);
+  }
+  if (shape?.type === 'document' || (typeof value === 'object' && value !== null)) return JSON.stringify(value);
+  return String(value);
+}
+
+function xmlElement(model, targetId, value, name, memberTraits = {}, root = false) {
+  const shape = model.shapes[targetId];
+  if (value === undefined || value === null) return '';
+  if (!shape) return `<${name}>${escapeXmlText(value)}</${name}>`;
+
+  if (shape.type === 'structure' || shape.type === 'union') {
+    const attributes = [];
+    const children = [];
+    for (const [memberName, member] of Object.entries(shape.members || {})) {
+      const memberValue = value?.[memberName];
+      if (memberValue === undefined || memberValue === null) continue;
+      const memberNameXml = xmlName(member, memberName);
+      if (has(member.traits, 'xmlAttribute')) {
+        attributes.push(`${memberNameXml}="${escapeXmlAttribute(xmlScalar(model.shapes[member.target], memberValue, member.traits))}"`);
+      } else {
+        children.push(xmlMember(model, member, memberValue, memberNameXml));
+      }
+    }
+    if (root) {
+      const namespace = trait(shape.traits, 'xmlNamespace') || (root === true ? null : root);
+      if (namespace?.uri) attributes.unshift(`xmlns${namespace.prefix ? `:${namespace.prefix}` : ''}="${escapeXmlAttribute(namespace.uri)}"`);
+    }
+    const attrs = attributes.length ? ` ${attributes.join(' ')}` : '';
+    return `<${name}${attrs}>${children.join('')}</${name}>`;
+  }
+
+  if (shape.type === 'list' || shape.type === 'set') {
+    const itemName = xmlName(shape.member, 'member');
+    return `<${name}>${(value || []).map((item) => xmlElement(model, shape.member.target, item, itemName, shape.member.traits)).join('')}</${name}>`;
+  }
+
+  if (shape.type === 'map') {
+    const keyName = xmlName(shape.key, 'key');
+    const valueName = xmlName(shape.value, 'value');
+    const entries = Object.entries(value || {}).map(([key, item]) => `<entry>${xmlElement(model, shape.key.target, key, keyName, shape.key.traits)}${xmlElement(model, shape.value.target, item, valueName, shape.value.traits)}</entry>`).join('');
+    return `<${name}>${entries}</${name}>`;
+  }
+
+  return `<${name}>${escapeXmlText(xmlScalar(shape, value, memberTraits))}</${name}>`;
+}
+
+function xmlMember(model, member, value, name) {
+  const shape = model.shapes[member.target];
+  const flattened = has(member.traits, 'xmlFlattened');
+  if (flattened && (shape?.type === 'list' || shape?.type === 'set')) {
+    return (value || []).map((item) => xmlElement(model, shape.member.target, item, name, shape.member.traits)).join('');
+  }
+  if (flattened && shape?.type === 'map') {
+    const keyName = xmlName(shape.key, 'key');
+    const valueName = xmlName(shape.value, 'value');
+    return Object.entries(value || {}).map(([key, item]) => `<${name}>${xmlElement(model, shape.key.target, key, keyName, shape.key.traits)}${xmlElement(model, shape.value.target, item, valueName, shape.value.traits)}</${name}>`).join('');
+  }
+  return xmlElement(model, member.target, value, name, member.traits);
+}
+
+export function serializeXml(model, targetId, value, fallbackName, namespace = null) {
+  const shape = model.shapes[targetId];
+  const name = xmlName(shape, fallbackName || shortName(targetId));
+  return xmlElement(model, targetId, value ?? {}, name, {}, namespace || true);
+}
+
 function buildRest(model, summary, opName, op, input, bodyOverride) {
   const http = trait(op.traits, 'http');
   if (!http) throw new BuildError(`Operation ${opName} has no http binding`);
@@ -151,20 +235,23 @@ function buildRest(model, summary, opName, op, input, bodyOverride) {
 
   let body = '';
   const isXml = summary.protocol.endsWith('restXml');
+  const xmlNamespace = isXml ? trait(model.shapes[summary.shapeId]?.traits, 'xmlNamespace') : null;
   if (bodyOverride !== undefined && bodyOverride !== '') {
     body = bodyOverride;
   } else if (payloadKey) {
     const v = data[payloadKey];
     const targetShape = model.shapes[members[payloadKey].target];
     if (targetShape?.type === 'structure' || targetShape?.type === 'union') {
-      if (isXml) throw new BuildError('XML structure payloads are not generated yet; supply a body override.');
-      body = JSON.stringify(v);
+      body = isXml
+        ? serializeXml(model, members[payloadKey].target, v, xmlName(members[payloadKey], payloadKey), xmlNamespace)
+        : JSON.stringify(v);
     } else {
       body = typeof v === 'string' ? v : JSON.stringify(v);
     }
   } else if (Object.keys(bodyData).length) {
-    if (isXml) throw new BuildError('XML request bodies are not generated yet; supply a body override.');
-    body = JSON.stringify(bodyData);
+    body = isXml
+      ? serializeXml(model, op.input.target, bodyData, shortName(op.input.target), xmlNamespace)
+      : JSON.stringify(bodyData);
   } else if (!isXml && !['GET', 'HEAD', 'DELETE'].includes(http.method) && inputShape) {
     body = '{}';
   }

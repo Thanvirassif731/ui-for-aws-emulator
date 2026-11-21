@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from './api.js';
 import ResponseView from './ResponseView.jsx';
 import Icon from './Icon.jsx';
+import { notifyError } from './notifications.js';
 
 const HISTORY_KEY = 'emulator-ui.history.v1';
 const HISTORY_MAX = 50;
@@ -152,6 +153,7 @@ export default function Console({ initial }) {
       setAnnouncement(`Request completed with status ${res.status || 'error'} in ${res.durationMs} milliseconds.`);
     } catch (e) {
       setError(e.message);
+      notifyError(e, { title: 'Console request failed', source: 'Console' });
       setAnnouncement(`Request failed: ${e.message}`);
     } finally {
       setSending(false);
@@ -263,7 +265,7 @@ export default function Console({ initial }) {
               {inputJsonError && <div id="json-error" className="field-error" role="alert">Invalid JSON: {inputJsonError}</div>}
               {isRest && (
                 <>
-                  <label className="field-label">Body override (optional, sent as-is; needed for XML bodies)</label>
+                  <label className="field-label">Body override (optional, sent as-is)</label>
                   <textarea className="editor short" spellCheck={false} value={bodyOverride} onChange={(e) => setBodyOverride(e.target.value)} onKeyDown={onKey} />
                 </>
               )}

@@ -1,8 +1,13 @@
 import React, { useEffect, useState } from 'react';
 import Console from './Console.jsx';
 import S3 from './S3.jsx';
+import DynamoDB from './DynamoDB.jsx';
+import SQS from './SQS.jsx';
+import EC2 from './EC2.jsx';
+import Traffic from './Traffic.jsx';
 import Dashboard from './Dashboard.jsx';
 import EmulatorBar from './EmulatorBar.jsx';
+import DialogHost from './DialogHost.jsx';
 import Credits from './Credits.jsx';
 import Icon from './Icon.jsx';
 import { APP_INFO } from './appInfo.js';
@@ -11,9 +16,11 @@ import logoUrl from '../assets/aws-logo.png';
 const PAGES = [
   { id: 'dashboard', label: 'Dashboard', icon: 'dashboard', ready: true },
   { id: 'console', label: 'Console', icon: 'console', ready: true },
+  { id: 'traffic', label: 'Traffic', icon: 'activity', ready: true },
   { id: 's3', label: 'S3', icon: 'bucket', ready: true },
-  { id: 'ec2', label: 'EC2', icon: 'server' },
-  { id: 'dynamodb', label: 'DynamoDB', icon: 'database' },
+  { id: 'dynamodb', label: 'DynamoDB', icon: 'database', ready: true },
+  { id: 'sqs', label: 'SQS', icon: 'box', ready: true },
+  { id: 'ec2', label: 'EC2', icon: 'server', ready: true },
   { id: 'lambda', label: 'Lambda', icon: 'lambda' },
   { id: 'credits', label: 'Credits', icon: 'users', ready: true, footerOnly: true },
 ];
@@ -74,6 +81,10 @@ export default function App() {
         <main className="main" id="main-content" tabIndex="-1">
           {page === 'dashboard' && <Dashboard onOpenService={openService} onOpenConsole={() => navigate('console')} />}
           {page === 's3' && <S3 />}
+          {page === 'dynamodb' && <DynamoDB />}
+          {page === 'sqs' && <SQS />}
+          {page === 'ec2' && <EC2 onOpenService={openService} />}
+          {page === 'traffic' && <Traffic />}
           {page === 'console' && <Console key={target?.key} initial={target} />}
           {page === 'credits' && <Credits />}
         </main>
@@ -88,6 +99,7 @@ export default function App() {
         <button className={page === 'credits' ? 'footer-link active' : 'footer-link'} onClick={() => navigate('credits')}><Icon name="users" size={14} />Maintainers &amp; contributors</button>
         <a href={APP_INFO.repositoryUrl} target="_blank" rel="noreferrer">Source<Icon name="external" size={12} /></a>
       </footer>
+      <DialogHost />
     </div>
   );
 }

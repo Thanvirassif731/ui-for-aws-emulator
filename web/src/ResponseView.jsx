@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import Icon from './Icon.jsx';
+import { notifyError, notifyWarning } from './notifications.js';
 
 // Indents XML. An element holding only text stays on one line: <a>text</a>.
 function prettyXml(xml) {
@@ -46,14 +47,20 @@ export default function ResponseView({ res }) {
   useEffect(() => {
     setShowHeaders(false);
     setCopyState('');
+    if (!res) return;
+    const source = res.request?.method ? `Console · ${res.request.method}` : 'Console';
+    if (res.error) notifyError(res.error, { title: 'Emulator request failed', source });
+    else if (res.status >= 400) notifyError(`${res.status} ${res.statusText || 'Request failed'}`, { title: 'Emulator returned an error', source });
+    if (res.truncated) notifyWarning('The response exceeded the 20 MB display limit.', { title: 'Response truncated', source });
   }, [res]);
 
   const copyBody = async () => {
     try {
       await navigator.clipboard.writeText(formatBody(res));
       setCopyState('Copied');
-    } catch {
+    } catch (error) {
       setCopyState('Copy failed');
+      notifyError(error, { title: 'Copy failed', source: 'Console' });
     }
     window.setTimeout(() => setCopyState(''), 1800);
   };

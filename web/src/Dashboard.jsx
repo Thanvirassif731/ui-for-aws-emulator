@@ -103,12 +103,20 @@ export default function Dashboard({ onOpenService, onOpenConsole }) {
     : { value: 'Unreachable', tone: 'bad', lines: [stErr] };
   if (st) {
     emu = healthy
-      ? { value: 'Running', tone: 'good', lines: [`127.0.0.1:${st.port}`, `Region ${st.region}`] }
+      ? { value: 'Running', tone: 'good', lines: [`${st.host}:${st.port}`, `Region ${st.region}`] }
       : { value: 'Not responding', tone: 'warn', lines: [`Expected on port ${st.port}`, st.health?.error] };
   }
 
   let container = { value: '-', tone: '', lines: [] };
-  if (dock) {
+  if (st?.mode === 'external') {
+    container = { value: 'External process', tone: healthy ? 'good' : 'warn', lines: [`${st.host}:${st.port}`, 'Lifecycle managed outside this UI'] };
+  } else if (st?.mode === 'native') {
+    container = {
+      value: st.native?.running ? 'UI-managed process' : healthy ? 'External native process' : 'Stopped',
+      tone: healthy ? 'good' : 'warn',
+      lines: [st.native?.running && st.native.pid ? `PID ${st.native.pid}` : '', st.native?.binary],
+    };
+  } else if (dock) {
     container = !dock.available
       ? { value: 'Docker unavailable', tone: 'bad', lines: [dock.error] }
       : {
@@ -118,9 +126,13 @@ export default function Dashboard({ onOpenService, onOpenConsole }) {
       };
   }
 
-  const image = dock?.available
-    ? { value: dock.imageExists ? 'Found' : 'Not found', tone: dock.imageExists ? 'good' : 'warn', lines: [st.names?.imageName] }
-    : { value: '-', tone: '', lines: [] };
+  const image = st?.mode === 'native'
+    ? { value: st.native?.binary || 'aws-emulator', tone: st.native?.error ? 'bad' : '', lines: ['Native executable'] }
+    : st?.mode === 'external'
+      ? { value: `${st.host}:${st.port}`, tone: healthy ? 'good' : 'warn', lines: ['Configured endpoint'] }
+      : dock?.available
+        ? { value: dock.imageExists ? 'Found' : 'Not found', tone: dock.imageExists ? 'good' : 'warn', lines: [st.names?.imageName] }
+        : { value: '-', tone: '', lines: [] };
 
   return (
     <div className="dashboard">
@@ -139,8 +151,8 @@ export default function Dashboard({ onOpenService, onOpenConsole }) {
 
       <div className="cards">
         <Card title="Emulator" icon="activity" {...emu} />
-        <Card title="Container" icon="server" {...container} />
-        <Card title="Image" icon="image" {...image} />
+        <Card title={st?.mode === 'docker' ? 'Container' : 'Runtime'} icon="server" {...container} />
+        <Card title={st?.mode === 'docker' ? 'Image' : st?.mode === 'native' ? 'Binary' : 'Endpoint'} icon="image" {...image} />
         <Card
           title="Authentication"
           icon="lock"
