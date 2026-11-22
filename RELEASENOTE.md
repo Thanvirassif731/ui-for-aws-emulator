@@ -2,6 +2,55 @@
 
 This file records user-visible changes for each AWS Emulator UI release. Releases are listed newest first.
 
+## 0.4.0
+
+This release adds a Local Compute Bridge that connects AWS Emulator EC2 metadata to Docker-backed Linux sandboxes and browser terminals.
+
+### Added
+
+- Docker-backed EC2 sandboxes managed through `dockerode`, with containers named `aws-emu-ec2-<instance-id>` and labels linking them to emulator instance IDs.
+- Local AMI presets for Ubuntu 24.04 LTS and a Docker-in-Docker sandbox, using emulator-compatible AMI IDs and automatic image pulls.
+- EC2 instance type resource limits for `t2.micro`, `t3.micro`, and `t3.small`, including mapped CPU and memory limits.
+- User-data support for plain-text or base64 shell scripts, with boot output written to `/var/log/cloud-init-output.log`.
+- Loopback-only port forwarding through `host:container` mappings such as `8080:80`.
+- Docker lifecycle synchronization for EC2 launch, start, stop, reboot, and terminate operations.
+- Automatic reconciliation between emulator instance state and managed Docker container state.
+- `GET /api/ec2/docker-status` for detecting whether the local Docker daemon is available.
+- An interactive EC2 Instance Connect terminal powered by `@xterm/xterm`, `@xterm/addon-fit`, and the `/ws/ec2/connect/:instanceId` WebSocket endpoint.
+- A **View Cloud-Init Boot Logs** terminal action for diagnosing user-data scripts.
+- Automated bridge coverage for Docker health fallback, AMI and resource mappings, port validation, privileged-container approval, user-data decoding, and lifecycle reconciliation.
+
+### Changed
+
+- EC2 metadata operations now use `@aws-sdk/client-ec2` against the configured AWS Emulator endpoint while retaining certificate-verified local transport.
+- The EC2 launch form now includes AMI, instance type, port forwarding, and user-data controls.
+- Running instances expose **Connect** only when their mapped local container is available and running.
+- EC2 launches and lifecycle actions update the emulator first, then mirror the operation to Docker.
+- Docker failures no longer interrupt metadata-only EC2 learning workflows. The interface displays a clear metadata-only warning and allows emulator operations to continue.
+- The terminal frontend is lazy-loaded so xterm does not increase the initial application bundle.
+
+### Security and safety
+
+- EC2 port forwards bind to `127.0.0.1` rather than all host interfaces.
+- Terminal WebSocket upgrades enforce the same loopback `Host` and `Origin` restrictions as the REST API.
+- WebSocket terminal streams include output backpressure, resize error handling, and early-disconnect cleanup.
+- Docker-in-Docker uses a privileged container and therefore requires explicit approval in the launch form. Only trusted commands and user-data scripts should be run with this preset.
+- Managed-container labels are verified before lifecycle operations to avoid modifying unrelated Docker containers with conflicting names.
+
+### Requirements and upgrade notes
+
+- Run `npm ci`, rebuild the web application, and restart the UI server after upgrading.
+- Docker Desktop or another compatible Docker daemon is required for live sandboxes and browser terminals.
+- Docker remains optional for metadata-only EC2 use. Start Docker and refresh its status when live compute is needed.
+- The first launch of an AMI preset may take longer while its Docker image is downloaded.
+
+### Known limitations
+
+- EC2 instances launched while Docker is unavailable remain metadata-only; launch a new instance after Docker starts to create a sandbox.
+- The Docker-in-Docker preset is privileged and should not be treated as a security boundary for untrusted code.
+- Port forwarding can be configured only when launching one instance at a time.
+- Automated tests validate bridge behavior with mocked containers but do not pull images or run Docker-backed end-to-end browser sessions.
+
 ## 0.3.0
 
 This release adds portable snapshots for ephemeral S3, DynamoDB, and SQS state.

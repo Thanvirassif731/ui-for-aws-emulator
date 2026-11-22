@@ -59,7 +59,7 @@ test('EC2 targeted refresh omits MaxResults when instance IDs are supplied', asy
 test('EC2 launch applies an optional Name tag atomically in RunInstances', async () => {
   const requests = [];
   const runXml = `<RunInstancesResponse><reservationId>r-1</reservationId><ownerId>000000000000</ownerId><instancesSet><item><instanceId>i-00000001</instanceId><imageId>ami-1</imageId><instanceType>t3.micro</instanceType><instanceState><code>0</code><name>pending</name></instanceState></item><item><instanceId>i-00000002</instanceId><imageId>ami-1</imageId><instanceType>t3.micro</instanceType><instanceState><code>0</code><name>pending</name></instanceState></item></instancesSet></RunInstancesResponse>`;
-  const result = await runInstances({ imageId: 'ami-1', instanceType: 't3.micro', count: 2, name: 'workers' }, async (request) => {
+  const result = await runInstances({ imageId: 'ami-1', instanceType: 't3.micro', count: 2, name: 'workers', userData: '#!/bin/bash\necho ready' }, async (request) => {
     requests.push(new URLSearchParams(request.body));
     return { status: 200, bodyEncoding: 'utf8', body: runXml };
   });
@@ -69,6 +69,7 @@ test('EC2 launch applies an optional Name tag atomically in RunInstances', async
   assert.equal(requests[0].get('TagSpecification.1.ResourceType'), 'instance');
   assert.equal(requests[0].get('TagSpecification.1.Tag.1.Key'), 'Name');
   assert.equal(requests[0].get('TagSpecification.1.Tag.1.Value'), 'workers');
+  assert.equal(Buffer.from(requests[0].get('UserData'), 'base64').toString('utf8'), '#!/bin/bash\necho ready');
   assert.equal(result.instances[1].name, 'workers');
 });
 

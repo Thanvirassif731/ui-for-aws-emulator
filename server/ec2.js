@@ -1,4 +1,16 @@
-import { send } from './emulator.js';
+import {
+  DescribeImagesCommand,
+  DescribeInstancesCommand,
+  EC2Client,
+  RebootInstancesCommand,
+  RunInstancesCommand,
+  StartInstancesCommand,
+  StopInstancesCommand,
+  TerminateInstancesCommand,
+} from '@aws-sdk/client-ec2';
+import { Readable } from 'node:stream';
+import { config } from './config.js';
+import { readCredentials, send } from './emulator.js';
 
 const API_VERSION = '2016-11-15';
 const ACTIONS = new Set(['start', 'stop', 'reboot', 'terminate']);
@@ -8,6 +20,77 @@ export class Ec2Error extends Error {
     super(message);
     this.status = status;
   }
+}
+
+const sdkClient = new EC2Client({
+  region: config.region,
+  endpoint: `https://${config.emulatorHost}:${config.emulatorPort}`,
+  maxAttempts: 1,
+  credentials: async () => readCredentials() || { accessKeyId: 'aws-emulator', secretAccessKey: 'aws-emulator' },
+  // Reuse the application's certificate-verified transport while the SDK owns EC2
+  // command serialization, SigV4 signing, and response deserialization.
+  requestHandler: {
+    handle: async (request) => {
+      const result = await send({
+        method: request.method,
+        path: request.path,
+        query: request.query,
+        headers: request.headers,
+        body: request.body || '',
+        signingName: null,
+      });
+      const body = result.bodyEncoding === 'base64' ? Buffer.from(result.body, 'base64') : Buffer.from(result.body || '', 'utf8');
+      return { response: { statusCode: result.status, reason: result.statusText, headers: result.headers, body: Readable.from([body]) } };
+    },
+  },
+});
+
+async function ec2SdkCall(command) {
+  try {
+    return await sdkClient.send(command);
+  } catch (error) {
+    const status = Number(error?.$metadata?.httpStatusCode || 502);
+    const message = error?.code === 'ECONNREFUSED' || /ECONNREFUSED/i.test(error?.message || '')
+      ? 'Cannot connect to the emulator. Is it running?'
+      : error?.message || error?.name || 'EC2 request failed';
+    throw new Ec2Error(message, status);
+  }
+}
+
+function fromSdkInstance(instance, reservation = {}) {
+  return {
+    id: instance.InstanceId || '',
+    name: instance.Tags?.find((tag) => tag.Key === 'Name')?.Value || '',
+    imageId: instance.ImageId || '',
+    instanceType: instance.InstanceType || '',
+    state: instance.State?.Name || 'unknown',
+    stateCode: Number(instance.State?.Code || 0),
+    launchTime: instance.LaunchTime instanceof Date ? instance.LaunchTime.toISOString() : instance.LaunchTime || null,
+    privateIpAddress: instance.PrivateIpAddress || null,
+    privateDnsName: instance.PrivateDnsName || null,
+    publicIpAddress: instance.PublicIpAddress || null,
+    publicDnsName: instance.PublicDnsName || null,
+    subnetId: instance.SubnetId || null,
+    vpcId: instance.VpcId || null,
+    availabilityZone: instance.Placement?.AvailabilityZone || null,
+    architecture: instance.Architecture || null,
+    platform: instance.PlatformDetails || instance.Platform || null,
+    keyName: instance.KeyName || null,
+    reservationId: reservation.id || null,
+    ownerId: reservation.ownerId || null,
+    tags: (instance.Tags || []).map((tag) => ({ key: tag.Key || '', value: tag.Value || '' })),
+    securityGroups: (instance.SecurityGroups || []).map((group) => ({ id: group.GroupId || '', name: group.GroupName || '' })),
+  };
+}
+
+function instancesFromSdk(output) {
+  return {
+    instances: (output.Reservations || []).flatMap((reservation) => (reservation.Instances || []).map((instance) => fromSdkInstance(instance, {
+      id: reservation.ReservationId,
+      ownerId: reservation.OwnerId,
+    }))),
+    nextToken: output.NextToken || null,
+  };
 }
 
 const decodeXml = (value) => String(value)
@@ -163,20 +246,61 @@ function checkInstanceIds(instanceIds) {
 }
 
 export async function listInstances(nextToken = '', sendRequest = send) {
-  const xml = await ec2Call('DescribeInstances', { MaxResults: 100, NextToken: checkToken(String(nextToken || '')) }, sendRequest);
+  const token = checkToken(String(nextToken || ''));
+  if (sendRequest === send) {
+    return instancesFromSdk(await ec2SdkCall(new DescribeInstancesCommand({ MaxResults: 100, ...(token ? { NextToken: token } : {}) })));
+  }
+  const xml = await ec2Call('DescribeInstances', { MaxResults: 100, NextToken: token }, sendRequest);
   return parseInstancesXml(xml);
 }
 
 export async function describeInstances(instanceIds, sendRequest = send) {
   const ids = checkInstanceIds(instanceIds);
+  if (sendRequest === send) return instancesFromSdk(await ec2SdkCall(new DescribeInstancesCommand({ InstanceIds: ids })));
   const params = {};
   ids.forEach((id, index) => { params[`InstanceId.${index + 1}`] = id; });
   return parseInstancesXml(await ec2Call('DescribeInstances', params, sendRequest));
 }
 
 export async function listImages(nextToken = '', sendRequest = send) {
-  const xml = await ec2Call('DescribeImages', { MaxResults: 100, NextToken: checkToken(String(nextToken || '')) }, sendRequest);
+  const token = checkToken(String(nextToken || ''));
+  if (sendRequest === send) {
+    const output = await ec2SdkCall(new DescribeImagesCommand({ MaxResults: 100, ...(token ? { NextToken: token } : {}) }));
+    return {
+      images: (output.Images || []).map((image) => ({
+        id: image.ImageId || '',
+        name: image.Name || '',
+        description: image.Description || '',
+        state: image.State || 'unknown',
+        architecture: image.Architecture || null,
+        rootDeviceType: image.RootDeviceType || null,
+        virtualizationType: image.VirtualizationType || null,
+        platform: image.PlatformDetails || image.Platform || null,
+      })),
+      nextToken: output.NextToken || null,
+    };
+  }
+  const xml = await ec2Call('DescribeImages', { MaxResults: 100, NextToken: token }, sendRequest);
   return parseImagesXml(xml);
+}
+
+function encodeUserData(value) {
+  const supplied = String(value || '');
+  if (!supplied) return undefined;
+  const compact = supplied.replace(/\s/g, '');
+  let script = supplied;
+  const looksEncoded = !supplied.includes('\n') && !supplied.includes('\r') && !supplied.startsWith('#!')
+    && compact.length >= 4 && compact.length % 4 === 0 && /^[A-Za-z0-9+/]+={0,2}$/.test(compact)
+    && (() => {
+      const decoded = Buffer.from(compact, 'base64').toString('utf8');
+      if (decoded.startsWith('#!') || decoded.includes('\n')) {
+        script = decoded;
+        return true;
+      }
+      return false;
+    })();
+  if (Buffer.byteLength(script) > 1024 * 1024) throw new Ec2Error('User data must be 1 MB or smaller');
+  return looksEncoded ? compact : Buffer.from(script, 'utf8').toString('base64');
 }
 
 export async function runInstances(input, sendRequest = send) {
@@ -191,11 +315,32 @@ export async function runInstances(input, sendRequest = send) {
   if (!Number.isInteger(count) || count < 1 || count > 20) throw new Ec2Error('Instance count must be between 1 and 20');
   if (suppliedName.length > 256 || /[\r\n]/.test(suppliedName)) throw new Ec2Error('Instance name must be 256 characters or fewer');
 
+  const userData = encodeUserData(input?.userData);
+  if (sendRequest === send) {
+    const output = await ec2SdkCall(new RunInstancesCommand({
+      ImageId: imageId,
+      InstanceType: instanceType,
+      MinCount: count,
+      MaxCount: count,
+      ...(userData ? { UserData: Buffer.from(userData, 'base64') } : {}),
+      ...(hasName ? { TagSpecifications: [{ ResourceType: 'instance', Tags: [{ Key: 'Name', Value: suppliedName }] }] } : {}),
+    }));
+    const reservation = { id: output.ReservationId || null, ownerId: output.OwnerId || null };
+    const launched = (output.Instances || []).map((instance) => fromSdkInstance(instance, reservation));
+    if (hasName) {
+      launched.forEach((instance) => {
+        if (!instance.name) instance.name = suppliedName;
+        if (!instance.tags.some((tag) => tag.key === 'Name')) instance.tags.push({ key: 'Name', value: suppliedName });
+      });
+    }
+    return { reservationId: reservation.id, instances: launched };
+  }
   const xml = await ec2Call('RunInstances', {
     ImageId: imageId,
     InstanceType: instanceType,
     MinCount: count,
     MaxCount: count,
+    UserData: userData,
     ...(hasName ? {
       'TagSpecification.1.ResourceType': 'instance',
       'TagSpecification.1.Tag.1.Key': 'Name',
@@ -218,6 +363,11 @@ export async function instanceAction(action, instanceIds, sendRequest = send) {
   const normalized = String(action || '').toLowerCase();
   if (!ACTIONS.has(normalized)) throw new Ec2Error('Unsupported EC2 instance action');
   const ids = checkInstanceIds(instanceIds);
+  if (sendRequest === send) {
+    const Command = { start: StartInstancesCommand, stop: StopInstancesCommand, reboot: RebootInstancesCommand, terminate: TerminateInstancesCommand }[normalized];
+    await ec2SdkCall(new Command({ InstanceIds: ids }));
+    return { ok: true, action: normalized, instanceIds: ids };
+  }
   const params = {};
   ids.forEach((id, index) => { params[`InstanceId.${index + 1}`] = id; });
   const operation = { start: 'StartInstances', stop: 'StopInstances', reboot: 'RebootInstances', terminate: 'TerminateInstances' }[normalized];

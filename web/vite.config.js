@@ -14,7 +14,10 @@ export default defineConfig({
     host: '127.0.0.1',
     port: webPort,
     strictPort: true,
-    proxy: { '/api': `http://127.0.0.1:${apiPort}` },
+    proxy: {
+      '/api': `http://127.0.0.1:${apiPort}`,
+      '/ws': { target: `ws://127.0.0.1:${apiPort}`, ws: true },
+    },
   },
   build: { outDir: path.join(root, 'dist'), emptyOutDir: true },
 });

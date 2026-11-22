@@ -416,8 +416,16 @@ See [Telemetry in AWS Emulator](https://docs.aws.amazon.com/emulator/latest/user
 - **S3:** bucket and object browsing, upload, download, preview, folders, filters, and deletion.
 - **DynamoDB:** table picker and paginated item grid with typed AttributeValue rendering.
 - **SQS:** queue attributes, message inspection, send, delete, and purge controls.
-- **EC2:** instance launch, filtering, details, lifecycle controls, AMI discovery, and an in-app service tutorial.
+- **EC2:** instance launch, filtering, details, lifecycle controls, Docker-backed Ubuntu sandboxes, user data, port forwarding, and browser terminals.
 - **Credits:** version, license, source repository, maintainers, and contributors.
+
+### EC2 Local Compute Bridge
+
+The EC2 page checks the local Docker daemon independently of the emulator runtime. Supported AMI presets create containers named `aws-emu-ec2-<instance-id>` after the emulator allocates the EC2 metadata. Stop, start, reboot, and terminate actions are then mirrored to that managed container. If Docker is stopped or an AMI has no local mapping, EC2 remains usable in metadata-only mode.
+
+The Ubuntu preset runs `ubuntu:24.04`. User data is written to `/var/lib/cloud/instance/user-data.sh`; its output is available at `/var/log/cloud-init-output.log` and through **View Cloud-Init Boot Logs** in the browser terminal. Port mappings use `host:container` syntax, such as `8080:80`, and bind only to `127.0.0.1`.
+
+The Docker-in-Docker preset runs a privileged local container so its nested daemon can work. The launch form requires explicit approval. Privileged containers have broad host kernel and device access, so run only scripts you trust.
 
 Lambda remains a navigation placeholder. Its operations and the complete EC2 operation catalog remain available through **Console**.
 
@@ -449,7 +457,9 @@ Lambda remains a navigation placeholder. Its operations and the complete EC2 ope
 
 - Express, Vite, and the traffic proxy bind to loopback addresses only.
 - Captured traffic stays in memory, truncates large bodies, and redacts credential-bearing headers.
-- Docker publishes the emulator port only on `127.0.0.1`.
+- Docker publishes the emulator and EC2 sandbox port forwards only on `127.0.0.1`.
+- EC2 terminal WebSockets enforce the same loopback `Host` and `Origin` checks as REST requests.
+- Docker-in-Docker requires an explicit privileged-container approval in the launch form.
 - Express rejects unknown `Host` and `Origin` values.
 - State-changing API calls require JSON.
 - The backend verifies emulator TLS with `ca.pem`.
@@ -509,7 +519,7 @@ npm test
 npm run build
 ```
 
-The automated suite covers model indexing, request construction, REST XML serialization, traffic capture/redaction, snapshot validation, restore batch sizes, and oversized S3 snapshot behavior. It does not start Docker, spawn the native emulator, or run browser end-to-end tests.
+The automated suite covers model indexing, request construction, REST XML serialization, traffic capture/redaction, snapshot validation, restore batch sizes, oversized S3 snapshot behavior, and Local Compute Bridge validation and container configuration. It does not start Docker, spawn the native emulator, or run browser end-to-end tests.
 
 ## License
 

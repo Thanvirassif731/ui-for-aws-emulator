@@ -48,6 +48,7 @@ export const api = {
   sqsSend: (queueUrl, body) => request('POST', '/api/sqs/send', { queueUrl, body }),
   sqsDeleteMessage: (queueUrl, receiptHandle) => request('POST', '/api/sqs/delete-message', { queueUrl, receiptHandle }),
   sqsPurge: (queueUrl) => request('POST', '/api/sqs/purge', { queueUrl }),
+  ec2DockerStatus: () => request('GET', '/api/ec2/docker-status'),
   ec2Instances: (token = '') => request('GET', `/api/ec2/instances?token=${encodeURIComponent(token)}`),
   ec2DescribeInstances: (instanceIds) => request('POST', '/api/ec2/instances/describe', { instanceIds }),
   ec2Images: (token = '') => request('GET', `/api/ec2/images?token=${encodeURIComponent(token)}`),

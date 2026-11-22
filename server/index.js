@@ -1,11 +1,14 @@
 import express from 'express';
 import fs from 'node:fs';
+import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { WebSocketServer, WebSocket } from 'ws';
 import * as s3 from './s3.js';
 import * as dynamodb from './dynamodb.js';
 import * as sqs from './sqs.js';
 import * as ec2 from './ec2.js';
+import * as computeBridge from './ec2ComputeBridge.js';
 import { ServiceError } from './aws-json.js';
 import { config, setDockerNames, NameError } from './config.js';
 import * as docker from './docker.js';
@@ -46,10 +49,29 @@ app.use(express.json({ limit: '25mb' }));
 const wrap = (fn) => (req, res) => Promise.resolve(fn(req, res)).catch((e) => {
   if (e instanceof s3.S3Error || e instanceof ServiceError || e instanceof ec2.Ec2Error) return res.status(e.status >= 400 && e.status < 600 ? e.status : 400).json({ error: e.message });
   if (e instanceof NameError) return res.status(400).json({ error: e.message });
-  if (e instanceof BuildError || e instanceof SnapshotValidationError) return res.status(400).json({ error: e.message });
+  if (e instanceof BuildError || e instanceof SnapshotValidationError || e instanceof computeBridge.ComputeBridgeError) return res.status(400).json({ error: e.message });
   console.error(e);
   res.status(500).json({ error: e.message || 'Internal error' });
 });
+
+async function computeOutcome(operation) {
+  try {
+    return await operation();
+  } catch (error) {
+    console.error(`Local compute bridge: ${error.message}`);
+    return { available: true, error: error.message, code: error.code || 'COMPUTE_BRIDGE_ERROR' };
+  }
+}
+
+function summarizeCompute(results) {
+  const entries = Array.isArray(results) ? results : [results];
+  const unavailable = entries.find((result) => result?.available === false);
+  return {
+    available: !unavailable,
+    ...(unavailable?.reason ? { reason: unavailable.reason } : {}),
+    instances: entries,
+  };
+}
 
 // ----- emulator control -----
 app.get('/api/emulator/status', wrap(async (_req, res) => {
@@ -177,12 +199,56 @@ app.post('/api/sqs/purge', wrap(async (req, res) => {
 }));
 
 // ----- EC2 -----
-app.get('/api/ec2/instances', wrap(async (req, res) => res.json(await ec2.listInstances(String(req.query.token || '')))));
-app.post('/api/ec2/instances/describe', wrap(async (req, res) => res.json(await ec2.describeInstances(req.body?.instanceIds))));
+app.get('/api/ec2/docker-status', wrap(async (_req, res) => res.json(await computeBridge.dockerStatus())));
+app.get('/api/ec2/instances', wrap(async (req, res) => {
+  const token = String(req.query.token || '');
+  const result = await ec2.listInstances(token);
+  const completeInventory = !token && !result.nextToken;
+  const compute = await computeOutcome(() => computeBridge.reconcileInstances(result.instances, computeBridge.docker, { removeOrphans: completeInventory }));
+  res.json({ ...result, compute });
+}));
+app.post('/api/ec2/instances/describe', wrap(async (req, res) => {
+  const result = await ec2.describeInstances(req.body?.instanceIds);
+  const compute = await computeOutcome(() => computeBridge.reconcileInstances(result.instances));
+  res.json({ ...result, compute });
+}));
 app.get('/api/ec2/images', wrap(async (req, res) => res.json(await ec2.listImages(String(req.query.token || '')))));
-app.post('/api/ec2/instances', wrap(async (req, res) => res.json(await ec2.runInstances(req.body || {}))));
+app.post('/api/ec2/instances', wrap(async (req, res) => {
+  const input = req.body || {};
+  const portMappings = computeBridge.parsePortMappings(input.portMappings);
+  computeBridge.decodeUserData(input.userData);
+  const preset = computeBridge.AMI_PRESETS[String(input.imageId || '')];
+  if (preset?.privileged && input.allowPrivileged !== true) throw new ec2.Ec2Error('Approve the privileged Docker-in-Docker sandbox before launching it');
+  const count = input.count === '' ? Number.NaN : Number(input.count ?? 1);
+  if (portMappings.length && count !== 1) throw new ec2.Ec2Error('Port forwarding can be used only when launching one instance at a time');
+
+  // The emulator remains authoritative and allocates InstanceIds before Docker is touched.
+  const result = await ec2.runInstances(input);
+  const outcomes = [];
+  for (const instance of result.instances) {
+    outcomes.push(await computeOutcome(() => computeBridge.launchComputeInstance({
+      instanceId: instance.id,
+      amiId: input.imageId,
+      instanceType: input.instanceType,
+      userData: input.userData,
+      portMappings,
+      allowPrivileged: input.allowPrivileged === true,
+    })));
+  }
+  res.json({ ...result, compute: summarizeCompute(outcomes) });
+}));
 app.post('/api/ec2/instances/action', wrap(async (req, res) => {
-  res.json(await ec2.instanceAction(req.body?.action, req.body?.instanceIds));
+  const action = String(req.body?.action || '').toLowerCase();
+  const result = await ec2.instanceAction(action, req.body?.instanceIds);
+  const operation = {
+    start: computeBridge.startComputeInstance,
+    stop: computeBridge.stopComputeInstance,
+    reboot: computeBridge.rebootComputeInstance,
+    terminate: computeBridge.terminateComputeInstance,
+  }[action];
+  const outcomes = [];
+  for (const instanceId of result.instanceIds) outcomes.push(await computeOutcome(() => operation(instanceId)));
+  res.json({ ...result, compute: summarizeCompute(outcomes) });
 }));
 
 // ----- ephemeral state snapshots -----
@@ -232,7 +298,126 @@ if (fs.existsSync(dist)) {
   app.get(/^(?!\/api\/).*/, (_req, res) => res.sendFile(path.join(dist, 'index.html')));
 }
 
-app.listen(config.apiPort, '127.0.0.1', () => {
+const apiServer = http.createServer(app);
+const terminalSockets = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024 });
+
+function websocketAllowed(request) {
+  if (!allowedHosts.has(String(request.headers.host || '').toLowerCase())) return false;
+  const origin = request.headers.origin;
+  if (!origin) return true;
+  try { return allowedHosts.has(new URL(origin).host.toLowerCase()); } catch { return false; }
+}
+
+function sendTerminalError(socket, error) {
+  const message = error instanceof computeBridge.ComputeBridgeError
+    ? error.message
+    : `Could not open the local terminal: ${error.message || error}`;
+  if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'error', message }));
+  if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) socket.close(1011, 'Terminal unavailable');
+}
+
+apiServer.on('upgrade', (request, socket, head) => {
+  let pathname = '';
+  try { pathname = new URL(request.url, 'http://localhost').pathname; } catch { /* rejected below */ }
+  const match = pathname.match(/^\/ws\/ec2\/connect\/(i-[A-Za-z0-9]+)$/);
+  if (!match || !websocketAllowed(request)) {
+    socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
+    socket.destroy();
+    return;
+  }
+  terminalSockets.handleUpgrade(request, socket, head, (websocket) => {
+    terminalSockets.emit('connection', websocket, request, match[1]);
+  });
+});
+
+terminalSockets.on('connection', async (socket, _request, instanceId) => {
+  const MAX_BUFFERED_OUTPUT = 2 * 1024 * 1024;
+  let dockerStream = null;
+  let terminalExec = null;
+  let closed = false;
+  let resumeTimer = null;
+  const teardown = () => {
+    closed = true;
+    if (resumeTimer) clearTimeout(resumeTimer);
+    dockerStream?.end();
+  };
+  socket.once('close', teardown);
+  socket.once('error', teardown);
+
+  try {
+    const container = await computeBridge.getRunningContainer(instanceId);
+    if (closed) return;
+    terminalExec = await container.exec({
+      Cmd: ['/bin/bash'],
+      AttachStdin: true,
+      AttachStdout: true,
+      AttachStderr: true,
+      Tty: true,
+    });
+    if (closed) return;
+    try {
+      dockerStream = await terminalExec.start({ hijack: true, stdin: true });
+    } catch (bashError) {
+      // docker:dind is Alpine-based. Keep that learner preset usable when bash is absent.
+      terminalExec = await container.exec({ Cmd: ['/bin/sh'], AttachStdin: true, AttachStdout: true, AttachStderr: true, Tty: true });
+      if (closed) return;
+      dockerStream = await terminalExec.start({ hijack: true, stdin: true });
+    }
+    if (closed) {
+      dockerStream.end();
+      return;
+    }
+
+    const resumeWhenDrained = () => {
+      if (closed || !dockerStream) return;
+      if (socket.bufferedAmount > MAX_BUFFERED_OUTPUT / 2) {
+        resumeTimer = setTimeout(resumeWhenDrained, 25);
+      } else {
+        resumeTimer = null;
+        dockerStream.resume();
+      }
+    };
+    dockerStream.on('data', (chunk) => {
+      if (socket.readyState !== WebSocket.OPEN) return;
+      socket.send(chunk, { binary: true }, (error) => { if (error) teardown(); });
+      if (socket.bufferedAmount > MAX_BUFFERED_OUTPUT) {
+        dockerStream.pause();
+        if (!resumeTimer) resumeTimer = setTimeout(resumeWhenDrained, 25);
+      }
+    });
+    dockerStream.on('error', (error) => sendTerminalError(socket, error));
+    dockerStream.on('end', () => {
+      if (socket.readyState === WebSocket.OPEN) socket.close(1000, 'Shell exited');
+    });
+
+    socket.on('message', (data, isBinary) => {
+      if (!dockerStream) return;
+      if (!isBinary) {
+        const text = data.toString('utf8');
+        if (text.startsWith('{')) {
+          try {
+            const message = JSON.parse(text);
+            if (message.type === 'resize') {
+              const cols = Number(message.cols);
+              const rows = Number(message.rows);
+              if (Number.isInteger(cols) && cols >= 10 && cols <= 500 && Number.isInteger(rows) && rows >= 2 && rows <= 300) {
+                terminalExec.resize({ h: rows, w: cols }).catch((error) => {
+                  if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'warning', message: `Terminal resize failed: ${error.message}` }));
+                });
+              }
+              return;
+            }
+          } catch { /* ordinary terminal input may begin with "{" */ }
+        }
+      }
+      if (dockerStream.writable) dockerStream.write(data);
+    });
+  } catch (error) {
+    sendTerminalError(socket, error);
+  }
+});
+
+apiServer.listen(config.apiPort, '127.0.0.1', () => {
   console.log(`UI API on http://127.0.0.1:${config.apiPort}  (emulator https://${config.emulatorHost}:${config.emulatorPort}, mode ${config.mode})`);
   setImmediate(() => console.log(`Indexed ${getIndex().size} services from ${config.repoRoot}`));
 });

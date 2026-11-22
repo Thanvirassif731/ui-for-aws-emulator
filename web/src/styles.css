@@ -528,9 +528,18 @@ button.danger-confirm:hover:not(:disabled) { background: #dc626a; border-color: 
 /* EC2 instance workspace */
 .ec2-picker { gap: 10px; }
 .ec2-picker-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.ec2-compute-status { justify-content: flex-start; width: 100%; min-height: 38px; padding: 7px 9px; text-align: left; font-size: 9px; line-height: 1.35; }
+.ec2-compute-status.active { background: rgba(66,201,139,.07); border-color: rgba(66,201,139,.22); color: var(--good); }
+.ec2-compute-status.offline { background: rgba(239,185,79,.07); border-color: rgba(239,185,79,.22); color: var(--warn); }
+.ec2-compute-status.active .ec2-state-dot { background: var(--good); }
+.ec2-compute-status.offline .ec2-state-dot { background: var(--warn); }
 button.info-button { width: 30px; min-height: 30px; color: var(--blue); }
 .ec2-launch-button { width: 100%; }
 .ec2-instance-list { min-height: 120px; }
+.ec2-instance-row { position: relative; flex: none; }
+.ec2-instance-row .ec2-instance-item { padding-right: 69px; }
+button.ec2-row-connect { position: absolute; z-index: 1; right: 6px; top: 50%; min-height: 25px; padding: 3px 7px; color: var(--blue); font-size: 9px; transform: translateY(-50%); }
+button.ec2-row-connect:hover:not(:disabled) { transform: translateY(calc(-50% - 1px)); }
 .ec2-instance-item { display: grid !important; grid-template-columns: 9px minmax(0, 1fr) auto; gap: 9px !important; min-height: 54px !important; }
 .ec2-instance-copy { display: flex; min-width: 0; flex-direction: column; align-items: flex-start; }
 .ec2-instance-copy b { max-width: 100%; overflow: hidden; color: var(--text-soft); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
@@ -567,6 +576,14 @@ button.info-button { width: 30px; min-height: 30px; color: var(--blue); }
 .ec2-launch-grid { display: grid; grid-template-columns: 2fr 1fr .7fr 1.5fr; gap: 10px; padding: 14px 15px; }
 .ec2-launch-grid label { display: flex; min-width: 0; flex-direction: column; gap: 4px; color: var(--muted); font-size: 10px; }
 .ec2-launch-grid input, .ec2-launch-grid select { width: 100%; }
+.ec2-launch-grid small { color: var(--muted); font-size: 9px; line-height: 1.35; }
+.ec2-launch-grid .ec2-port-field { grid-column: span 2; }
+.ec2-launch-grid .ec2-user-data-field { grid-column: span 2; }
+.ec2-user-data-field textarea { width: 100%; min-height: 104px; resize: vertical; }
+.ec2-privileged-warning { display: flex; align-items: flex-start; gap: 9px; margin: 0 15px 14px; padding: 10px 11px; background: rgba(239,185,79,.07); border: 1px solid rgba(239,185,79,.23); border-radius: 8px; color: #d7bc83; font-size: 10px; cursor: pointer; }
+.ec2-privileged-warning input { width: 15px; height: 15px; min-height: 0; margin: 2px 0 0; accent-color: var(--accent); }
+.ec2-privileged-warning span { display: flex; flex-direction: column; }
+.ec2-privileged-warning b { color: var(--warn); font-size: 11px; }
 .ec2-launch-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; padding: 10px 15px; border-top: 1px solid var(--border-soft); }
 .ec2-launch-actions > span { margin-right: auto; color: var(--muted); font-size: 10px; }
 .ec2-guide { display: flex; width: min(680px, 100%); max-height: min(760px, calc(100vh - 44px)); flex-direction: column; overflow: hidden; background: linear-gradient(145deg, #172230, #101820); border: 1px solid #3a485a; border-radius: 13px; box-shadow: 0 28px 80px rgba(0,0,0,.58); animation: dialog-enter .16s ease-out; }
@@ -585,6 +602,18 @@ button.info-button { width: 30px; min-height: 30px; color: var(--blue); }
 .ec2-guide-note { display: flex; align-items: flex-start; gap: 9px; padding: 11px; background: rgba(103,169,255,.06); border: 1px solid rgba(103,169,255,.17); border-radius: 8px; color: #a9bdd5; font-size: 11px; }
 .ec2-guide-note .icon { color: var(--blue); }
 .ec2-guide > footer { display: flex; justify-content: flex-end; padding: 13px 20px; border-top: 1px solid var(--border); }
+.ec2-terminal-backdrop { z-index: 1200; }
+.ec2-terminal-dialog { display: flex; width: min(1080px, 100%); height: min(760px, calc(100vh - 44px)); min-height: 420px; flex-direction: column; overflow: hidden; background: #0b1118; border: 1px solid #3a485a; border-radius: 13px; box-shadow: 0 28px 80px rgba(0,0,0,.65); animation: dialog-enter .16s ease-out; }
+.ec2-terminal-dialog > header { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 14px 17px; background: #131d29; border-bottom: 1px solid var(--border); }
+.ec2-terminal-dialog h2 { margin: 1px 0 0; color: var(--text); font-size: 16px; }
+.ec2-terminal-dialog header .mono { color: var(--muted); font-size: 9px; }
+.ec2-terminal-actions { display: flex; align-items: center; gap: 8px; }
+.ec2-terminal-status { display: flex; align-items: center; gap: 7px; min-height: 29px; padding: 5px 17px; background: rgba(239,185,79,.055); border-bottom: 1px solid var(--border-soft); color: var(--warn); font-size: 10px; }
+.ec2-terminal-status.good { background: rgba(66,201,139,.055); color: var(--good); }
+.ec2-terminal-status.good .ec2-state-dot { background: var(--good); }
+.ec2-terminal-host { flex: 1; min-height: 0; padding: 10px 8px; background: #070b10; }
+.ec2-terminal-host .xterm { height: 100%; }
+.ec2-terminal-dialog > footer { padding: 7px 17px; background: #101821; border-top: 1px solid var(--border-soft); color: var(--muted); font-size: 9px; }
 @media (max-width: 1100px) {
   .ec2-launch-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .ec2-facts { grid-template-columns: repeat(2, minmax(140px, 1fr)); }
@@ -592,6 +621,8 @@ button.info-button { width: 30px; min-height: 30px; color: var(--blue); }
 }
 @media (max-width: 760px) {
   .ec2-launch-grid, .ec2-guide-steps { grid-template-columns: 1fr; }
+  .ec2-launch-grid .ec2-port-field, .ec2-launch-grid .ec2-user-data-field { grid-column: auto; }
+  .ec2-terminal-actions { align-items: flex-end; flex-direction: column-reverse; }
 }
 @media (prefers-reduced-motion: reduce) {
   .ec2-guide { animation: none; }
