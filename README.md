@@ -1,6 +1,6 @@
 # AWS Emulator UI
 
-**Current release: 0.3.0** · [Release notes](RELEASENOTE.md)
+**Current release: 0.4.0** · [Release notes](RELEASENOTE.md)
 
 A local companion web application for [AWS Emulator](https://github.com/aws/aws-emulator). The UI provides Docker, native, and external-process connections; a live SDK traffic inspector; a Smithy-model-driven service console; and visual S3, DynamoDB, and SQS views.
 
