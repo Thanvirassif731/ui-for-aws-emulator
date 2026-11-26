@@ -9,6 +9,7 @@ import * as dynamodb from './dynamodb.js';
 import * as sqs from './sqs.js';
 import * as ec2 from './ec2.js';
 import * as computeBridge from './ec2ComputeBridge.js';
+import * as s3Learning from './s3LearningBridge.js';
 import { ServiceError } from './aws-json.js';
 import { config, setDockerNames, NameError } from './config.js';
 import * as docker from './docker.js';
@@ -47,7 +48,7 @@ app.use((req, res, next) => {
 app.use(express.json({ limit: '25mb' }));
 
 const wrap = (fn) => (req, res) => Promise.resolve(fn(req, res)).catch((e) => {
-  if (e instanceof s3.S3Error || e instanceof ServiceError || e instanceof ec2.Ec2Error) return res.status(e.status >= 400 && e.status < 600 ? e.status : 400).json({ error: e.message });
+  if (e instanceof s3.S3Error || e instanceof s3Learning.S3SandboxError || e instanceof ServiceError || e instanceof ec2.Ec2Error) return res.status(e.status >= 400 && e.status < 600 ? e.status : 400).json({ error: e.message });
   if (e instanceof NameError) return res.status(400).json({ error: e.message });
   if (e instanceof BuildError || e instanceof SnapshotValidationError || e instanceof computeBridge.ComputeBridgeError) return res.status(400).json({ error: e.message });
   console.error(e);
@@ -153,7 +154,11 @@ app.post('/api/s3/buckets', wrap(async (req, res) => {
   await s3.createBucket(String(req.body?.name || ''), config.region);
   res.json({ ok: true });
 }));
-app.delete('/api/s3/buckets/:name', wrap(async (req, res) => { await s3.deleteBucket(req.params.name); res.json({ ok: true }); }));
+app.delete('/api/s3/buckets/:name', wrap(async (req, res) => {
+  await s3.deleteBucket(req.params.name);
+  s3Learning.forgetBucket(req.params.name);
+  res.json({ ok: true });
+}));
 app.get('/api/s3/buckets/:name/objects', wrap(async (req, res) => {
   res.json(await s3.listObjects(req.params.name, { prefix: String(req.query.prefix || ''), token: String(req.query.token || '') }));
 }));
@@ -174,6 +179,31 @@ app.get('/api/s3/buckets/:name/object', wrap(async (req, res) => {
   res.send(o.buffer);
 }));
 app.delete('/api/s3/buckets/:name/object', wrap(async (req, res) => { await s3.deleteObject(req.params.name, String(req.query.key || '')); res.json({ ok: true }); }));
+
+// ----- S3 Learning Sandbox -----
+app.get('/api/s3/buckets/:name/versioning', wrap(async (req, res) => res.json(await s3Learning.getVersioning(req.params.name))));
+app.put('/api/s3/buckets/:name/versioning', wrap(async (req, res) => res.json(await s3Learning.putVersioning(req.params.name, req.body?.status))));
+app.get('/api/s3/buckets/:name/versions', wrap(async (req, res) => res.json(await s3Learning.listVersions(req.params.name, String(req.query.prefix || '')))));
+app.post('/api/s3/buckets/:name/versions/restore', wrap(async (req, res) => {
+  res.json(await s3Learning.restoreObject(req.params.name, req.body?.key, req.body?.versionId));
+}));
+app.get('/api/s3/buckets/:name/website', wrap(async (req, res) => res.json(await s3Learning.websiteStatus(req.params.name))));
+app.put('/api/s3/buckets/:name/website', wrap(async (req, res) => {
+  await s3Learning.putWebsiteConfig(req.params.name, req.body || {});
+  res.json(await s3Learning.websiteStatus(req.params.name));
+}));
+app.post('/api/s3/buckets/:name/website/sample', wrap(async (req, res) => res.json(await s3Learning.uploadSampleSite(req.params.name))));
+app.get('/api/s3/buckets/:name/public-access-block', wrap(async (req, res) => res.json(await s3Learning.getPublicAccessBlock(req.params.name))));
+app.put('/api/s3/buckets/:name/public-access-block', wrap(async (req, res) => res.json(await s3Learning.putPublicAccessBlock(req.params.name, req.body || {}))));
+app.get('/api/s3/buckets/:name/policy', wrap(async (req, res) => res.json({ policy: await s3Learning.getPolicy(req.params.name) })));
+app.put('/api/s3/buckets/:name/policy', wrap(async (req, res) => res.json({ policy: await s3Learning.putPolicy(req.params.name, req.body?.policy) })));
+app.delete('/api/s3/buckets/:name/policy', wrap(async (req, res) => { await s3Learning.deletePolicy(req.params.name); res.json({ policy: null }); }));
+app.post('/api/s3/buckets/:name/simulate-policy', wrap(async (req, res) => res.json(await s3Learning.simulatePolicy(req.params.name, req.body || {}))));
+app.get('/api/s3/buckets/:name/lifecycle', wrap(async (req, res) => res.json(await s3Learning.listLifecycle(req.params.name))));
+app.post('/api/s3/buckets/:name/lifecycle/rules', wrap(async (req, res) => res.json(await s3Learning.saveLifecycleRule(req.params.name, req.body || {}))));
+app.delete('/api/s3/buckets/:name/lifecycle/rules/:ruleId', wrap(async (req, res) => res.json(await s3Learning.deleteLifecycleRule(req.params.name, req.params.ruleId))));
+app.post('/api/s3/buckets/:name/lifecycle/simulate-time', wrap(async (req, res) => res.json(await s3Learning.simulateTime(req.params.name, req.body?.advanceDays))));
+app.delete('/api/s3/buckets/:name/lifecycle/simulate-time', wrap(async (req, res) => res.json(s3Learning.resetClock(req.params.name))));
 
 // ----- DynamoDB -----
 app.get('/api/dynamodb/tables', wrap(async (_req, res) => res.json(await dynamodb.listTables())));
@@ -424,6 +454,11 @@ apiServer.listen(config.apiPort, '127.0.0.1', () => {
 
 createTrafficProxy().listen(config.proxyPort, '127.0.0.1', () => {
   console.log(`Traffic proxy on http://127.0.0.1:${config.proxyPort}`);
+});
+
+// Bucket websites run on their own origin so learner HTML can never call this API as the UI.
+s3Learning.createWebsiteApp().listen(config.websitePort, '127.0.0.1', () => {
+  console.log(`S3 website endpoint on http://localhost:${config.websitePort}/s3-web/<bucket>/`);
 });
 
 if (config.seedFile) {

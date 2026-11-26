@@ -15,6 +15,9 @@ export const config = {
   webPort: Number(process.env.UI_WEB_PORT || 5173),
   // Loopback HTTP endpoint applications use to send observable SDK traffic.
   proxyPort: Number(process.env.UI_PROXY_PORT || 8790),
+  // Loopback HTTP port of the S3 Learning Sandbox website endpoint (/s3-web/<bucket>/).
+  // It is a separate origin on purpose: learner HTML must never run on the API origin.
+  websitePort: Number(process.env.UI_WEBSITE_PORT || 8791),
   // Emulator endpoint.
   emulatorPort: Number(process.env.EMULATOR_PORT || 9297),
   emulatorHost: process.env.EMULATOR_HOST || '127.0.0.1',

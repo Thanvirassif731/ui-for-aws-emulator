@@ -134,6 +134,7 @@ Development mode runs both processes:
 - Vite web server: `http://127.0.0.1:5173`
 - Express API: `http://127.0.0.1:8787`
 - Traffic proxy: `http://127.0.0.1:8790`
+- S3 Learning Sandbox website endpoint: `http://localhost:8791/s3-web/<bucket>/`
 - AWS Emulator HTTPS endpoint: `https://127.0.0.1:9297`
 
 Vite proxies browser requests under `/api` to the Express backend.
@@ -357,6 +358,7 @@ The UI does not load a `.env` file. Set variables in the shell before running `n
 | `UI_API_PORT` | `8787` | Express API and production web port |
 | `UI_WEB_PORT` | `5173` | Vite development server port |
 | `UI_PROXY_PORT` | `8790` | Loopback HTTP port for intercepted SDK traffic |
+| `UI_WEBSITE_PORT` | `8791` | Loopback HTTP port of the S3 Learning Sandbox website endpoint |
 | `EMULATOR_MODE` | `docker` | Runtime control: `docker`, `native`, or `external` |
 | `EMULATOR_BINARY` | `aws-emulator` | Executable name or absolute path used in native mode |
 | `EMULATOR_PORT` | `9297` | Emulator HTTPS port and generated runtime directory name |
@@ -380,6 +382,7 @@ To use non-default UI ports:
 $env:UI_API_PORT = "8877"
 $env:UI_WEB_PORT = "5273"
 $env:UI_PROXY_PORT = "8890"
+$env:UI_WEBSITE_PORT = "8891"
 npm run dev
 ```
 
@@ -413,7 +416,7 @@ See [Telemetry in AWS Emulator](https://docs.aws.amazon.com/emulator/latest/user
 - **Header snapshots:** export portable S3, DynamoDB, and SQS state, or restore a seed with an optional clean wipe.
 - **Console:** Smithy-model-driven operation requests and raw HTTP requests with optional SigV4 signing.
 - **Traffic:** live inspection of SDK calls sent through the loopback proxy.
-- **S3:** bucket and object browsing, upload, download, preview, folders, filters, and deletion.
+- **S3:** bucket and object browsing, upload, download, preview, folders, filters, and deletion, plus the S3 Learning Sandbox tabs described below.
 - **DynamoDB:** table picker and paginated item grid with typed AttributeValue rendering.
 - **SQS:** queue attributes, message inspection, send, delete, and purge controls.
 - **EC2:** instance launch, filtering, details, lifecycle controls, Docker-backed Ubuntu sandboxes, user data, port forwarding, and browser terminals.
@@ -426,6 +429,15 @@ The EC2 page checks the local Docker daemon independently of the emulator runtim
 The Ubuntu preset runs `ubuntu:24.04`. User data is written to `/var/lib/cloud/instance/user-data.sh`; its output is available at `/var/log/cloud-init-output.log` and through **View Cloud-Init Boot Logs** in the browser terminal. Port mappings use `host:container` syntax, such as `8080:80`, and bind only to `127.0.0.1`.
 
 The Docker-in-Docker preset runs a privileged local container so its nested daemon can work. The launch form requires explicit approval. Privileged containers have broad host kernel and device access, so run only scripts you trust.
+
+### S3 Learning Sandbox
+
+The emulator stores website configurations, Block Public Access settings, bucket policies, object versions, and lifecycle rules. It does not serve websites over HTTP, check bucket policies for anonymous website visitors, or run lifecycle expiration. The sandbox (`server/s3LearningBridge.js`) adds those behaviors. It uses `@aws-sdk/client-s3`, and the emulator stays the only store of data. Each bucket page has four tabs:
+
+- **Objects & Versions:** a versioning badge (`PutBucketVersioning`) and a **Show All Versions** switch (`ListObjectVersions`). The switch lists each key's versions, labeled Latest, Previous Version, or Delete Marker. **Restore Object** removes the latest delete marker. The server refuses to delete any version that holds data through this button.
+- **Static Website:** enable or disable hosting (`PutBucketWebsite` / `DeleteBucketWebsite`), set the index and error documents, upload a sample portfolio site, and see a readiness checklist. The endpoint `http://localhost:8791/s3-web/<bucket>/` answers with S3-style XML errors: `404 NoSuchWebsiteConfiguration`, `403 AccessDenied`, and `404 NoSuchKey`. An `X-Learner-Hint` response header explains each error. A request is refused when `BlockPublicPolicy` or `RestrictPublicBuckets` is on, or when the bucket policy does not allow anonymous `s3:GetObject` on the requested key.
+- **Permissions:** Block Public Access settings, a bucket policy JSON editor with three beginner presets, and a policy simulator. The simulator evaluates the editor's draft: an explicit Deny wins, then any Allow, and everything else is an implicit deny. It supports wildcards, `NotAction`/`NotResource`/`NotPrincipal`, and the `String*`, `Arn*`, `Bool`, `Numeric*`, and `Null` condition operators, with or without `IfExists`. The simulator does not evaluate other operators, such as `IpAddress` or `ForAnyValue:`. It treats statements that use them as not matching and shows a warning. It evaluates only the bucket policy, not IAM identity policies.
+- **Lifecycle & Time-Travel:** create or delete lifecycle rules with a prefix filter, `Expiration.Days`, and `NoncurrentVersionExpiration.NoncurrentDays`. The **+1 Day**, **+7 Days**, and **+30 Days** buttons advance a per-bucket simulated clock. After each jump, the sandbox applies Enabled rules to every version, deleting objects in the emulator, and shows an audit log of what happened. Current versions age from their last-modified time. Noncurrent versions age from the time a newer version or delete marker replaced them, which is how S3 counts. The sandbox skips rules that filter on tags or perform transitions and reports each skip. The simulated clock is kept in server memory and resets when the server restarts.
 
 Lambda remains a navigation placeholder. Its operations and the complete EC2 operation catalog remain available through **Console**.
 
@@ -455,7 +467,8 @@ Lambda remains a navigation placeholder. Its operations and the complete EC2 ope
 
 ## Security
 
-- Express, Vite, and the traffic proxy bind to loopback addresses only.
+- Express, Vite, the traffic proxy, and the S3 website endpoint bind to loopback addresses only.
+- The S3 website endpoint runs on its own port (origin), so HTML stored in a bucket cannot call the UI API. It accepts only loopback `Host` values and only `GET` and `HEAD` requests.
 - Captured traffic stays in memory, truncates large bodies, and redacts credential-bearing headers.
 - Docker publishes the emulator and EC2 sandbox port forwards only on `127.0.0.1`.
 - EC2 terminal WebSockets enforce the same loopback `Host` and `Origin` checks as REST requests.
@@ -504,10 +517,10 @@ The emulator creates runtime files after its HTTPS listener starts.
 Find listeners on the default ports:
 
 ```powershell
-Get-NetTCPConnection -LocalPort 5173,8787,8790,9297 -ErrorAction SilentlyContinue
+Get-NetTCPConnection -LocalPort 5173,8787,8790,8791,9297 -ErrorAction SilentlyContinue
 ```
 
-Stop the conflicting process or set matching `UI_WEB_PORT`, `UI_API_PORT`, and `EMULATOR_PORT` values before startup.
+Stop the conflicting process or set matching `UI_WEB_PORT`, `UI_API_PORT`, `UI_PROXY_PORT`, `UI_WEBSITE_PORT`, and `EMULATOR_PORT` values before startup.
 
 ## Testing
 

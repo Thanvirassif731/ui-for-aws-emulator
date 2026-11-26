@@ -2,6 +2,56 @@
 
 This file records user-visible changes for each AWS Emulator UI release. Releases are listed newest first.
 
+## 0.5.0
+
+This release adds the S3 Learning Sandbox: static website hosting over real HTTP, a bucket policy editor and simulator, a versioning visualizer, and an accelerated lifecycle "time-travel" demo. The emulator stores the S3 settings; the sandbox adds the behavior the emulator does not run itself.
+
+### Added
+
+- An S3 bucket view with four tabs: **Objects & Versions**, **Static Website**, **Permissions**, and **Lifecycle & Time-Travel**.
+- A backend sandbox service, `server/s3LearningBridge.js`, built on `@aws-sdk/client-s3` and the existing certificate-verified emulator transport.
+- A static website endpoint at `http://localhost:8791/s3-web/<bucket>/`. It serves the configured index document for `/` and folder paths, uses `mime-types` for the `Content-Type` of objects stored as `application/octet-stream`, redirects `/folder` to `/folder/` when `folder/<index document>` exists, and serves the error document with status 404.
+- S3-style XML errors on the website endpoint, `404 NoSuchWebsiteConfiguration`, `403 AccessDenied`, `404 NoSuchKey`, and `404 NoSuchBucket`, each with an `X-Learner-Hint` header that explains the cause in plain English.
+- Website access enforcement. Requests are refused when Block Public Access has `BlockPublicPolicy` or `RestrictPublicBuckets` on, or when the bucket policy does not allow anonymous `s3:GetObject` on the requested key.
+- Static website settings (`PutBucketWebsite` and `DeleteBucketWebsite`), a **Load Sample Portfolio Site** button that uploads `index.html`, `style.css`, and `404.html`, and a three-item readiness checklist.
+- Block Public Access controls for all four settings (`GetPublicAccessBlock` and `PutPublicAccessBlock`), with a warning banner while public access is blocked.
+- A bucket policy JSON editor with live JSON validation, formatting, revert, delete, and three beginner presets: Public Read-Only, Deny Unencrypted Object Uploads (SSE-S3 Required), and Allow Read Access Only to the `public/` prefix.
+- A policy simulator (`POST /api/s3/buckets/:bucketName/simulate-policy`) that tests `s3:GetObject`, `s3:PutObject`, or `s3:DeleteObject` for an anonymous or authenticated caller. It returns `ALLOWED`, `EXPLICIT_DENY`, or `IMPLICIT_DENY` with the matched statement, a plain-English explanation, and a statement-by-statement trace.
+- A versioning badge (`PutBucketVersioning`) and a **Show All Versions** switch (`ListObjectVersions`) that list each key's versions as Latest, Previous Version, or Delete Marker.
+- A **Restore Object** button that removes a latest delete marker so the previous version becomes current again.
+- Lifecycle rule management (`PutBucketLifecycleConfiguration`) with a rule ID, prefix filter, current-object expiration days, and noncurrent-version expiration days.
+- A time-travel engine (`POST /api/s3/buckets/:bucketName/lifecycle/simulate-time`) with **+1 Day**, **+7 Days**, **+30 Days**, and **Reset Clock** controls. Each jump applies Enabled rules to every version in the emulator and adds an entry to the Lifecycle Execution Audit Log.
+- Inline tooltips that explain S3 behavior next to each sandbox control.
+- Automated coverage for policy evaluation order, wildcards, condition operators, principals, policy parsing errors, Block Public Access reasons, and version ordering.
+
+### Changed
+
+- The S3 delete confirmation now describes what actually happens for the bucket's versioning state: a delete marker when versioning is enabled, loss of the null version when it is suspended, and permanent deletion when the bucket is unversioned.
+- Deleting a bucket also clears its simulated lifecycle clock.
+- `@aws-sdk/client-s3` and `mime-types` are new runtime dependencies.
+
+### Security and safety
+
+- The website endpoint runs as a separate loopback-only server on its own port, so HTML stored in a bucket cannot call the UI API as the console.
+- The website endpoint accepts only loopback `Host` values and only `GET` and `HEAD` requests, and sends `X-Content-Type-Options: nosniff`.
+- **Restore Object** verifies on the server that the target version is a delete marker. It never deletes a version that holds object data.
+- Turning Block Public Access off, deleting a policy, deleting a lifecycle rule, and resetting the clock all ask for confirmation in an in-app dialog.
+
+### Requirements and upgrade notes
+
+- Run `npm ci`, rebuild the web application, and restart the UI server after upgrading.
+- Port `8791` must be free, or set `UI_WEBSITE_PORT` to another port.
+- New buckets in the emulator have no Block Public Access configuration, so they start publicly configurable. Real AWS buckets start with all four settings on.
+
+### Known limitations
+
+- `BlockPublicPolicy` blocks website reads in the sandbox. In real AWS, it only rejects new public policies, and `RestrictPublicBuckets` is the setting that blocks reads.
+- The policy simulator evaluates only the bucket policy, not IAM identity policies. It treats unsupported condition operators, such as `IpAddress` and `ForAnyValue:`, as not matching and shows a warning.
+- The time-travel engine evaluates prefix and object-size filters. It skips rules that filter on tags or perform storage-class transitions, and reports each skip.
+- The simulated clock is kept in server memory and resets when the UI server restarts.
+- One jump evaluates at most 10,000 versions, and the version view shows up to 2,000 versions per folder.
+- Website objects larger than 20 MB cannot be relayed through the sandbox transport.
+
 ## 0.4.0
 
 This release adds a Local Compute Bridge that connects AWS Emulator EC2 metadata to Docker-backed Linux sandboxes and browser terminals.

@@ -4,9 +4,27 @@ import Icon from './Icon.jsx';
 import { confirmDialog } from './dialogs.js';
 import { notifyError, notifySuccess } from './notifications.js';
 import { RESOURCE_REFRESH_EVENT } from './resourceEvents.js';
+import S3Lifecycle from './S3Lifecycle.jsx';
+import S3Permissions from './S3Permissions.jsx';
+import { Hint } from './S3SandboxShared.jsx';
+import S3Versions from './S3Versions.jsx';
+import S3Website from './S3Website.jsx';
 
 const PREVIEW_MAX = 256 * 1024;
 const UPLOAD_MAX = 16 * 1024 * 1024;
+
+const TABS = [
+  { id: 'objects', label: 'Objects & Versions' },
+  { id: 'website', label: 'Static Website' },
+  { id: 'permissions', label: 'Permissions' },
+  { id: 'lifecycle', label: 'Lifecycle & Time-Travel' },
+];
+
+const VERSIONING_UI = {
+  Enabled: { label: 'Enabled', tone: 'good', action: 'Select to suspend versioning' },
+  Suspended: { label: 'Suspended', tone: 'warn', action: 'Select to enable versioning again' },
+  Unversioned: { label: 'Disabled', tone: 'neutral', action: 'Select to enable versioning' },
+};
 
 function formatSize(n) {
   if (n < 1024) return `${n} B`;
@@ -42,6 +60,14 @@ export default function S3() {
   const [busy, setBusy] = useState('');
   const [busyText, setBusyText] = useState('');
   const [dragActive, setDragActive] = useState(false);
+  const [tab, setTab] = useState('objects');
+  const [versioning, setVersioning] = useState('');
+  const [showVersions, setShowVersions] = useState(false);
+  const [versionsRefresh, setVersionsRefresh] = useState(0);
+  const [auditLogs, setAuditLogs] = useState({});
+  const objectsStale = useRef(false);
+  const versioningRequest = useRef(0);
+  const tabRefs = useRef({});
   const fileInput = useRef();
   const selectAllInput = useRef();
   const dragDepth = useRef(0);
@@ -97,14 +123,24 @@ export default function S3() {
 
   const refreshAfterMutation = async (b, p, locationVersion) => {
     if (locationVersion !== objectRequest.current) return;
+    setVersionsRefresh((n) => n + 1);
     await fetchListing(b, p);
   };
 
   const loadBuckets = useCallback(() => guard('buckets', async () => setBuckets(await api.s3Buckets())), []);
   const loadObjects = useCallback((b, p) => guard('objects', () => fetchListing(b, p, true)), []);
+  const loadVersioning = useCallback(async (b) => {
+    const requestId = ++versioningRequest.current;
+    setVersioning('');
+    try {
+      const { status } = await api.s3Versioning(b);
+      if (requestId === versioningRequest.current) setVersioning(status);
+    } catch { /* reported by the API client */ }
+  }, []);
 
   useEffect(() => { loadBuckets(); }, [loadBuckets]);
   useEffect(() => { if (bucket) loadObjects(bucket, prefix); }, [bucket, prefix, loadObjects]);
+  useEffect(() => { if (bucket) loadVersioning(bucket); }, [bucket, loadVersioning]);
   useEffect(() => { setObjectQuery(''); }, [bucket, prefix]);
   useEffect(() => {
     const refresh = () => { loadBuckets(); if (bucket) loadObjects(bucket, prefix); };
@@ -143,6 +179,7 @@ export default function S3() {
     if (!confirmed) return;
     guard('delete-bucket', async () => {
       await api.s3DeleteBucket(name);
+      setAuditLogs(({ [name]: _removed, ...rest }) => rest);
       if (bucket === name) {
         objectRequest.current += 1;
         setBucket(null);
@@ -196,9 +233,14 @@ export default function S3() {
 
   const deleteSelected = async () => {
     const count = selected.size;
+    const noun = count === 1 ? 'object' : 'objects';
+    const message = {
+      Enabled: `Versioning is enabled, so S3 adds a delete marker to ${count === 1 ? 'this object' : `these ${count} objects`} instead of erasing data. Previous versions are kept; turn on Show All Versions to restore them.`,
+      Suspended: `Versioning is suspended. S3 replaces each object's null version with a delete marker, so the null version is lost. Versions written while versioning was enabled are kept.`,
+    }[versioning] || `${count} selected ${noun} will be permanently deleted. This bucket is not versioned, so this action cannot be undone.`;
     const confirmed = await confirmDialog({
-      title: `Delete ${count} ${count === 1 ? 'object' : 'objects'}?`,
-      message: `${count} selected ${count === 1 ? 'object' : 'objects'} will be permanently deleted. This action cannot be undone.`,
+      title: `Delete ${count} ${noun}?`,
+      message,
       confirmLabel: count === 1 ? 'Delete object' : 'Delete objects',
     });
     if (!confirmed) return;
@@ -237,6 +279,58 @@ export default function S3() {
     setPreview(null);
     setBucket(name);
   };
+
+  const toggleVersioning = async () => {
+    const next = versioning === 'Enabled' ? 'Suspended' : 'Enabled';
+    if (versioning === 'Unversioned') {
+      const confirmed = await confirmDialog({
+        title: 'Enable versioning?',
+        message: 'From now on S3 keeps every version of every object, and deletes add a delete marker instead of erasing data. Once enabled, versioning can be suspended but never fully turned off.',
+        confirmLabel: 'Enable versioning',
+        tone: 'default',
+      });
+      if (!confirmed) return;
+    } else if (versioning === 'Enabled') {
+      const confirmed = await confirmDialog({
+        title: 'Suspend versioning?',
+        message: 'Existing versions are kept. New uploads overwrite a single "null" version, and deletes replace it with a delete marker.',
+        confirmLabel: 'Suspend versioning',
+        tone: 'default',
+      });
+      if (!confirmed) return;
+    }
+    const target = bucket;
+    guard('versioning', async () => {
+      const { status } = await api.s3SetVersioning(target, next);
+      if (target === bucket) setVersioning(status);
+      setVersionsRefresh((n) => n + 1);
+    }, `Versioning ${next === 'Enabled' ? 'enabled' : 'suspended'} (PutBucketVersioning).`);
+  };
+
+  const selectTab = (id) => {
+    setTab(id);
+    if (id === 'objects' && objectsStale.current && bucket) {
+      objectsStale.current = false;
+      setVersionsRefresh((n) => n + 1);
+      loadObjects(bucket, prefix);
+    }
+  };
+
+  const onTabKeyDown = (event) => {
+    const index = TABS.findIndex((item) => item.id === tab);
+    const step = { ArrowRight: 1, ArrowLeft: -1 }[event.key];
+    if (!step) return;
+    event.preventDefault();
+    const next = TABS[(index + step + TABS.length) % TABS.length].id;
+    selectTab(next);
+    tabRefs.current[next]?.focus();
+  };
+
+  const markObjectsStale = () => { objectsStale.current = true; };
+  const recordAudit = (entry) => setAuditLogs((logs) => {
+    const target = entry?.bucket || bucket;
+    return { ...logs, [target]: entry ? [entry, ...(logs[target] || [])].slice(0, 50) : [] };
+  });
 
   const prefixes = listing ? [...listing.prefixes, ...extra.prefixes] : [];
   const objects = listing ? [...listing.objects, ...extra.objects] : [];
@@ -328,6 +422,48 @@ export default function S3() {
               </div>
               <button className="danger-link" onClick={() => deleteBucket(bucket)}><Icon name="trash" size={15} />Delete bucket</button>
             </div>
+            <div className="tabs s3-tabs" role="tablist" aria-label="Bucket sections" onKeyDown={onTabKeyDown}>
+              {TABS.map((item) => (
+                <button
+                  key={item.id}
+                  ref={(node) => { tabRefs.current[item.id] = node; }}
+                  id={`s3-tab-${item.id}`}
+                  role="tab"
+                  aria-selected={tab === item.id}
+                  aria-controls={`s3-panel-${item.id}`}
+                  tabIndex={tab === item.id ? 0 : -1}
+                  className={tab === item.id ? 'tab active' : 'tab'}
+                  onClick={() => selectTab(item.id)}
+                >{item.label}</button>
+              ))}
+            </div>
+            {tab === 'website' && <div id="s3-panel-website" role="tabpanel" aria-labelledby="s3-tab-website"><S3Website key={bucket} bucket={bucket} onChanged={markObjectsStale} onOpenTab={selectTab} /></div>}
+            {tab === 'permissions' && <div id="s3-panel-permissions" role="tabpanel" aria-labelledby="s3-tab-permissions"><S3Permissions key={bucket} bucket={bucket} onChanged={markObjectsStale} /></div>}
+            {tab === 'lifecycle' && (
+              <div id="s3-panel-lifecycle" role="tabpanel" aria-labelledby="s3-tab-lifecycle">
+                <S3Lifecycle key={bucket} bucket={bucket} versioning={versioning} auditLog={auditLogs[bucket] || []} onAudit={recordAudit} onChanged={markObjectsStale} />
+              </div>
+            )}
+            {tab === 'objects' && (
+            <div id="s3-panel-objects" role="tabpanel" aria-labelledby="s3-tab-objects" className="objects-panel">
+            <div className="versioning-bar">
+              <button
+                className={`versioning-toggle ${VERSIONING_UI[versioning]?.tone || 'neutral'}`}
+                disabled={!versioning || !!busy}
+                onClick={toggleVersioning}
+                title={VERSIONING_UI[versioning]?.action || 'Loading versioning status'}
+              >
+                {busy === 'versioning' ? <span className="spinner" /> : <span className="dot" aria-hidden="true" />}
+                Versioning: {VERSIONING_UI[versioning]?.label || '…'}
+              </button>
+              <Hint text="Versioning keeps every version of an object. Overwrites create a new version, and deletes add a delete marker instead of destroying data, so you can recover from mistakes. Once enabled it can only be suspended. (PutBucketVersioning)" label="About versioning" />
+              <span className="spacer" />
+              <label className="check-label switch-label">
+                <input type="checkbox" role="switch" checked={showVersions} onChange={(e) => setShowVersions(e.target.checked)} />
+                <span>Show All Versions</span>
+              </label>
+              <Hint text="Lists every version and delete marker in this folder (ListObjectVersions), including objects that look deleted in the normal view." label="About Show All Versions" />
+            </div>
             <div className="crumbs mono">
               <button className="link" onClick={() => setPrefix('')}>{bucket}</button>
               {crumbs.map((c, i) => (
@@ -341,10 +477,14 @@ export default function S3() {
               <button className="primary" disabled={!!busy} onClick={() => fileInput.current.click()}><Icon name="upload" size={15} />Upload</button>
               <input ref={fileInput} type="file" multiple hidden onChange={(e) => { const f = [...e.target.files]; e.target.value = ''; if (f.length) upload(f); }} />
               <button disabled={!!busy} onClick={() => setShowFolderInput((v) => !v)} aria-expanded={showFolderInput}><Icon name="folderPlus" size={15} />New folder</button>
-              <button disabled={!!busy} onClick={() => loadObjects(bucket, prefix)}><Icon name="refresh" size={15} />Refresh</button>
-              <div className="search-field object-search"><Icon name="search" size={15} /><input aria-label="Filter objects" placeholder="Filter this page…" value={objectQuery} onChange={(e) => setObjectQuery(e.target.value)} />{objectQuery && <button className="clear-search" aria-label="Clear object filter" onClick={() => setObjectQuery('')}>×</button>}</div>
-              <span className="toolbar-divider" />
-              <button className="danger-button" disabled={!selected.size || !!busy} onClick={deleteSelected}><Icon name="trash" size={15} />Delete selected {selected.size ? `(${selected.size})` : ''}</button>
+              <button disabled={!!busy} onClick={() => { setVersionsRefresh((n) => n + 1); loadObjects(bucket, prefix); }}><Icon name="refresh" size={15} />Refresh</button>
+              {!showVersions && (
+                <>
+                  <div className="search-field object-search"><Icon name="search" size={15} /><input aria-label="Filter objects" placeholder="Filter this page…" value={objectQuery} onChange={(e) => setObjectQuery(e.target.value)} />{objectQuery && <button className="clear-search" aria-label="Clear object filter" onClick={() => setObjectQuery('')}>×</button>}</div>
+                  <span className="toolbar-divider" />
+                  <button className="danger-button" disabled={!selected.size || !!busy} onClick={deleteSelected}><Icon name="trash" size={15} />Delete selected {selected.size ? `(${selected.size})` : ''}</button>
+                </>
+              )}
               {busy && <span className="busy-label"><span className="spinner" />{busyText || 'Working…'}</span>}
             </div>
             {showFolderInput && (
@@ -355,6 +495,10 @@ export default function S3() {
                 <button onClick={() => { setShowFolderInput(false); setFolderName(''); }}>Cancel</button>
               </div>
             )}
+            {showVersions ? (
+              <S3Versions bucket={bucket} prefix={prefix} versioning={versioning} refreshKey={versionsRefresh} onOpenPrefix={setPrefix} onChanged={() => loadObjects(bucket, prefix)} />
+            ) : (
+            <>
             <div
               className={`objects-wrap ${dragActive ? 'drag-active' : ''}`}
               onDragEnter={onDragEnter}
@@ -399,6 +543,10 @@ export default function S3() {
                 <div className="row"><b className="mono">{preview.key}</b><span className="spacer" /><button onClick={() => setPreview(null)}>Close</button></div>
                 {preview.text !== null ? <pre>{preview.text || '(empty)'}</pre> : <div className="muted">{preview.note}</div>}
               </div>
+            )}
+            </>
+            )}
+            </div>
             )}
           </>
         )}
